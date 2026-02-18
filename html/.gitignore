@@ -1,0 +1,39 @@
+# Dependencies
+vendor/
+node_modules/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Logs
+logs/*.log
+*.log
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Cache and temporary files
+storage/cache/
+storage/sessions/
+storage/temp/
+
+# Composer
+composer.phar
+
+# PHP
+*.php~
