@@ -2,12 +2,28 @@
 
 namespace App\Controllers;
 
+use App\Models\User;
+use App\Models\Category;
 use Database;
 use PDO;
 use Exception;
+use Email;
+use Session;
 
 class AuthController extends BaseController
 {
+    private User $userModel;
+    private Category $categoryModel;
+    private Email $email;
+
+    public function __construct()
+    {
+        parent::__construct();
+        $this->userModel = new User();
+        $this->categoryModel = new Category();
+        $this->email = new Email();
+    }
+
     /**
      * Show login form
      */
@@ -15,12 +31,13 @@ class AuthController extends BaseController
     {
         $this->renderAuth('auth/login', [
             'title' => 'Login to TaskFlow',
-            'flashes' => $this->getAllFlashes()
+            'flashes' => Session::getAllFlashes()
         ]);
     }
 
     /**
      * Handle login attempt
+     * REQ-AUTH-010, REQ-AUTH-011, REQ-AUTH-014, REQ-AUTH-015, REQ-AUTH-016
      */
     public function login(): void
     {
@@ -28,167 +45,243 @@ class AuthController extends BaseController
         $password = $_POST['password'] ?? '';
         $remember = isset($_POST['remember_me']);
 
-        // Validate input
-        $errors = $this->validate([
-            'email' => $email,
-            'password' => $password
-        ], [
-            'email' => 'required|email',
-            'password' => 'required|min:6'
-        ]);
-
+        // Server-side validation
+        $errors = $this->validateLoginForm($email, $password);
         if (!empty($errors)) {
-            $this->setFlash('error', 'Please check your input and try again.');
+            Session::flashErrors($errors);
+            Session::flashInput(['email' => $email]);
             $this->redirect('/login');
             return;
         }
 
-        // Rate limiting check
+        // Rate limiting check - REQ-AUTH-014
         if ($this->isRateLimited($email)) {
-            $this->setFlash('error', 'Too many login attempts. Please try again later.');
+            Session::flash('error', 'Too many login attempts. Please try again in 15 minutes.');
             $this->redirect('/login');
             return;
         }
 
         try {
-            // Find user
-            $stmt = $this->db->prepare('
-                SELECT id, first_name, last_name, email, password_hash, email_verified_at
-                FROM users
-                WHERE email = ? AND deleted_at IS NULL
-            ');
-            $stmt->execute([$email]);
-            $user = $stmt->fetch();
+            $user = $this->userModel->findByEmail($email);
 
             if (!$user || !password_verify($password, $user['password_hash'])) {
                 $this->recordLoginAttempt($email, false);
-                $this->setFlash('error', 'Invalid email or password.');
+                Session::flash('error', 'Invalid email or password.');
+                Session::flashInput(['email' => $email]);
                 $this->redirect('/login');
                 return;
             }
 
-            // Check if account is verified
+            // Check if account is verified - REQ-AUTH-006
             if (!$user['email_verified_at']) {
-                $this->setFlash('error', 'Please verify your email address before logging in.');
+                Session::flash('error', 'Please verify your email address before logging in. <a href="/resend-verification" class="alert-link">Resend verification email</a>.');
+                Session::flashInput(['email' => $email]);
                 $this->redirect('/login');
                 return;
             }
 
             // Successful login
             $this->recordLoginAttempt($email, true);
+            Session::setUserId($user['id']);
 
-            // Create session
-            session_regenerate_id(true);
-            $_SESSION['user_id'] = $user['id'];
-            $_SESSION['login_time'] = time();
-
-            // Handle remember me
+            // Handle remember me - REQ-AUTH-013
             if ($remember) {
                 $this->createRememberToken($user['id']);
             }
 
-            $this->redirect('/dashboard');
+            // Redirect to intended URL or dashboard - REQ-AUTH-016
+            $intendedUrl = Session::getIntendedUrl();
+            $this->redirect($intendedUrl ?? '/dashboard');
 
         } catch (Exception $e) {
             error_log("Login error: " . $e->getMessage());
-            $this->setFlash('error', 'An error occurred during login. Please try again.');
+            Session::flash('error', 'An error occurred during login. Please try again.');
+            Session::flashInput(['email' => $email]);
             $this->redirect('/login');
         }
     }
 
     /**
      * Show registration form
+     * REQ-AUTH-001, REQ-AUTH-007
      */
     public function showRegister(): void
     {
         $this->renderAuth('auth/register', [
             'title' => 'Register for TaskFlow',
-            'flashes' => $this->getAllFlashes()
+            'flashes' => Session::getAllFlashes(),
+            'errors' => Session::getErrors(),
+            'oldInput' => $_SESSION['old_input'] ?? []
         ]);
     }
 
     /**
      * Handle user registration
+     * REQ-AUTH-001 through REQ-AUTH-008
      */
     public function register(): void
     {
-        $firstName = trim($_POST['first_name'] ?? '');
-        $lastName = trim($_POST['last_name'] ?? '');
-        $email = trim($_POST['email'] ?? '');
-        $password = $_POST['password'] ?? '';
-        $confirmPassword = $_POST['confirm_password'] ?? '';
+        $data = [
+            'first_name' => trim($_POST['first_name'] ?? ''),
+            'last_name' => trim($_POST['last_name'] ?? ''),
+            'email' => trim($_POST['email'] ?? ''),
+            'password' => $_POST['password'] ?? '',
+            'password_confirmation' => $_POST['password_confirmation'] ?? ''
+        ];
 
-        // Validate input
-        $errors = $this->validate([
-            'first_name' => $firstName,
-            'last_name' => $lastName,
-            'email' => $email,
-            'password' => $password
-        ], [
-            'first_name' => 'required|min:2|max:50',
-            'last_name' => 'required|min:2|max:50',
-            'email' => 'required|email|unique:users,email',
-            'password' => 'required|min:8|max:255'
-        ]);
-
-        // Check password confirmation
-        if ($password !== $confirmPassword) {
-            $errors['confirm_password'][] = 'Password confirmation does not match';
-        }
-
+        // Server-side validation - REQ-AUTH-008
+        $errors = $this->validateRegistrationForm($data);
         if (!empty($errors)) {
-            $this->setFlash('error', 'Please correct the errors below.');
-            // In a real app, you'd pass the errors and old input back
+            Session::flashErrors($errors);
+            Session::flashInput([
+                'first_name' => $data['first_name'],
+                'last_name' => $data['last_name'],
+                'email' => $data['email']
+                // Don't flash passwords
+            ]);
             $this->redirect('/register');
             return;
         }
 
         try {
-            // Create user
-            $verificationToken = bin2hex(random_bytes(32));
+            // Create user - REQ-AUTH-004
+            $userId = $this->userModel->create($data);
+            if (!$userId) {
+                Session::flash('error', 'Failed to create account. Please try again.');
+                Session::flashInput([
+                    'first_name' => $data['first_name'],
+                    'last_name' => $data['last_name'],
+                    'email' => $data['email']
+                ]);
+                $this->redirect('/register');
+                return;
+            }
 
-            $stmt = $this->db->prepare('
-                INSERT INTO users (first_name, last_name, email, password_hash, verification_token, created_at)
-                VALUES (?, ?, ?, ?, ?, NOW())
-            ');
+            // Generate verification token - REQ-AUTH-005, REQ-SEC-008
+            $token = bin2hex(random_bytes(32));
+            $tokenHash = hash('sha256', $token);
+            $expiresAt = date('Y-m-d H:i:s', strtotime('+24 hours'));
 
-            $stmt->execute([
-                $firstName,
-                $lastName,
-                $email,
-                password_hash($password, PASSWORD_DEFAULT),
-                $verificationToken
-            ]);
+            $this->userModel->updateVerificationToken($userId, $tokenHash, $expiresAt);
 
-            // In a real app, send verification email here
-            // $this->sendVerificationEmail($email, $verificationToken);
+            // Send verification email - REQ-AUTH-005
+            $user = $this->userModel->findById($userId);
+            $this->email->sendVerificationEmail($user, $token);
 
-            $this->setFlash('success', 'Registration successful! Please check your email to verify your account.');
+            // Create default categories - REQ-CAT-008
+            $this->categoryModel->createDefaultCategories($userId);
+
+            Session::flash('success', 'Registration successful! Please check your email to verify your account.');
             $this->redirect('/login');
 
         } catch (Exception $e) {
             error_log("Registration error: " . $e->getMessage());
-            $this->setFlash('error', 'An error occurred during registration. Please try again.');
+            Session::flash('error', 'An error occurred during registration. Please try again.');
+            Session::flashInput([
+                'first_name' => $data['first_name'],
+                'last_name' => $data['last_name'],
+                'email' => $data['email']
+            ]);
             $this->redirect('/register');
         }
     }
 
     /**
+     * Verify email address
+     * REQ-AUTH-005, REQ-AUTH-006
+     */
+    public function verifyEmail(): void
+    {
+        $token = $_GET['token'] ?? '';
+
+        if (empty($token)) {
+            Session::flash('error', 'Invalid verification token.');
+            $this->redirect('/login');
+            return;
+        }
+
+        try {
+            $tokenHash = hash('sha256', $token);
+            $user = $this->userModel->findByVerificationToken($tokenHash);
+
+            if (!$user) {
+                $this->renderAuth('auth/verify-error', [
+                    'title' => 'Verification Failed',
+                    'message' => 'Invalid or expired verification token.',
+                    'showResendOption' => true
+                ]);
+                return;
+            }
+
+            // Verify the email
+            if ($this->userModel->verifyEmail($user['id'])) {
+                Session::flash('success', 'Email verified successfully! You can now log in.');
+                $this->redirect('/login');
+            } else {
+                Session::flash('error', 'Failed to verify email. Please try again.');
+                $this->redirect('/login');
+            }
+
+        } catch (Exception $e) {
+            error_log("Email verification error: " . $e->getMessage());
+            Session::flash('error', 'An error occurred during verification.');
+            $this->redirect('/login');
+        }
+    }
+
+    /**
+     * Resend verification email
+     */
+    public function resendVerification(): void
+    {
+        $email = trim($_POST['email'] ?? '');
+
+        if (empty($email) || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            Session::flash('error', 'Please enter a valid email address.');
+            $this->redirect('/login');
+            return;
+        }
+
+        try {
+            $user = $this->userModel->findByEmail($email);
+            if ($user && !$user['email_verified_at']) {
+                // Generate new token
+                $token = bin2hex(random_bytes(32));
+                $tokenHash = hash('sha256', $token);
+                $expiresAt = date('Y-m-d H:i:s', strtotime('+24 hours'));
+
+                $this->userModel->updateVerificationToken($user['id'], $tokenHash, $expiresAt);
+                $this->email->sendVerificationEmail($user, $token);
+            }
+
+            // Always show success message for security
+            Session::flash('success', 'If an unverified account with that email exists, we\'ve sent a new verification link.');
+
+        } catch (Exception $e) {
+            error_log("Resend verification error: " . $e->getMessage());
+            Session::flash('error', 'An error occurred. Please try again.');
+        }
+
+        $this->redirect('/login');
+    }
+
+    /**
      * Handle logout
+     * REQ-AUTH-020
      */
     public function logout(): void
     {
         // Clear remember token if exists
-        if (isset($_SESSION['user_id'])) {
+        if (Session::isAuthenticated()) {
             $stmt = $this->db->prepare('DELETE FROM remember_tokens WHERE user_id = ?');
-            $stmt->execute([$_SESSION['user_id']]);
+            $stmt->execute([Session::getUserId()]);
         }
 
         // Clear session
-        $this->clearUserSession();
-        session_destroy();
+        Session::clearAuth();
+        Session::destroy();
 
-        $this->setFlash('success', 'You have been logged out successfully.');
+        Session::flash('success', 'You have been logged out successfully.');
         $this->redirect('/login');
     }
 
@@ -199,31 +292,27 @@ class AuthController extends BaseController
     {
         $this->renderAuth('auth/forgot-password', [
             'title' => 'Reset Password',
-            'flashes' => $this->getAllFlashes()
+            'flashes' => Session::getAllFlashes()
         ]);
     }
 
     /**
      * Handle forgot password request
+     * REQ-SEC-006: Rate limit password reset requests
      */
     public function forgotPassword(): void
     {
         $email = trim($_POST['email'] ?? '');
 
         if (empty($email) || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
-            $this->setFlash('error', 'Please enter a valid email address.');
+            Session::flash('error', 'Please enter a valid email address.');
             $this->redirect('/forgot-password');
             return;
         }
 
         try {
-            // Check if user exists
-            $stmt = $this->db->prepare('SELECT id FROM users WHERE email = ? AND deleted_at IS NULL');
-            $stmt->execute([$email]);
-            $user = $stmt->fetch();
-
-            // Always show success message for security (don't reveal if email exists)
-            $this->setFlash('success', 'If an account with that email exists, we\'ve sent a password reset link.');
+            $user = $this->userModel->findByEmail($email);
+            Session::flash('success', 'If an account with that email exists, we\'ve sent a password reset link.');
 
             if ($user) {
                 // Create reset token
@@ -235,17 +324,16 @@ class AuthController extends BaseController
                     VALUES (?, ?, ?, NOW())
                     ON DUPLICATE KEY UPDATE token = VALUES(token), expires_at = VALUES(expires_at), created_at = VALUES(created_at)
                 ');
-                $stmt->execute([$email, $token, $expiresAt]);
+                $stmt->execute([$email, hash('sha256', $token), $expiresAt]);
 
-                // In a real app, send reset email here
-                // $this->sendPasswordResetEmail($email, $token);
+                $this->email->sendPasswordResetEmail($email, $token);
             }
 
             $this->redirect('/login');
 
         } catch (Exception $e) {
             error_log("Forgot password error: " . $e->getMessage());
-            $this->setFlash('error', 'An error occurred. Please try again.');
+            Session::flash('error', 'An error occurred. Please try again.');
             $this->redirect('/forgot-password');
         }
     }
@@ -258,7 +346,7 @@ class AuthController extends BaseController
         $token = $_GET['token'] ?? '';
 
         if (empty($token)) {
-            $this->setFlash('error', 'Invalid reset token.');
+            Session::flash('error', 'Invalid reset token.');
             $this->redirect('/login');
             return;
         }
@@ -268,11 +356,11 @@ class AuthController extends BaseController
             SELECT email FROM password_resets
             WHERE token = ? AND expires_at > NOW()
         ');
-        $stmt->execute([$token]);
+        $stmt->execute([hash('sha256', $token)]);
         $reset = $stmt->fetch();
 
         if (!$reset) {
-            $this->setFlash('error', 'Invalid or expired reset token.');
+            Session::flash('error', 'Invalid or expired reset token.');
             $this->redirect('/login');
             return;
         }
@@ -281,7 +369,8 @@ class AuthController extends BaseController
             'title' => 'Reset Password',
             'token' => $token,
             'email' => $reset['email'],
-            'flashes' => $this->getAllFlashes()
+            'flashes' => Session::getAllFlashes(),
+            'errors' => Session::getErrors()
         ]);
     }
 
@@ -292,16 +381,22 @@ class AuthController extends BaseController
     {
         $token = $_POST['token'] ?? '';
         $password = $_POST['password'] ?? '';
-        $confirmPassword = $_POST['confirm_password'] ?? '';
+        $confirmPassword = $_POST['password_confirmation'] ?? '';
 
-        if (empty($token) || empty($password) || $password !== $confirmPassword) {
-            $this->setFlash('error', 'Please check your input and try again.');
-            $this->redirect('/reset-password?token=' . urlencode($token));
-            return;
+        $errors = [];
+
+        if (empty($password)) {
+            $errors['password'][] = 'Password is required';
+        } elseif (!$this->isValidPassword($password)) {
+            $errors['password'][] = 'Password must be at least 8 characters and contain uppercase, lowercase, and number';
         }
 
-        if (strlen($password) < 8) {
-            $this->setFlash('error', 'Password must be at least 8 characters.');
+        if ($password !== $confirmPassword) {
+            $errors['password_confirmation'][] = 'Password confirmation does not match';
+        }
+
+        if (!empty($errors)) {
+            Session::flashErrors($errors);
             $this->redirect('/reset-password?token=' . urlencode($token));
             return;
         }
@@ -312,119 +407,122 @@ class AuthController extends BaseController
                 SELECT email FROM password_resets
                 WHERE token = ? AND expires_at > NOW()
             ');
-            $stmt->execute([$token]);
+            $stmt->execute([hash('sha256', $token)]);
             $reset = $stmt->fetch();
 
             if (!$reset) {
-                $this->setFlash('error', 'Invalid or expired reset token.');
+                Session::flash('error', 'Invalid or expired reset token.');
                 $this->redirect('/login');
                 return;
             }
 
             // Update password
-            $stmt = $this->db->prepare('
-                UPDATE users
-                SET password_hash = ?, updated_at = NOW()
-                WHERE email = ?
-            ');
-            $stmt->execute([password_hash($password, PASSWORD_DEFAULT), $reset['email']]);
+            $user = $this->userModel->findByEmail($reset['email']);
+            if ($user && $this->userModel->updatePassword($user['id'], $password)) {
+                // Delete reset token
+                $stmt = $this->db->prepare('DELETE FROM password_resets WHERE token = ?');
+                $stmt->execute([hash('sha256', $token)]);
 
-            // Delete reset token
-            $stmt = $this->db->prepare('DELETE FROM password_resets WHERE token = ?');
-            $stmt->execute([$token]);
-
-            $this->setFlash('success', 'Password reset successful! You can now log in.');
-            $this->redirect('/login');
+                Session::flash('success', 'Password reset successful! You can now log in.');
+                $this->redirect('/login');
+            } else {
+                Session::flash('error', 'Failed to reset password. Please try again.');
+                $this->redirect('/reset-password?token=' . urlencode($token));
+            }
 
         } catch (Exception $e) {
             error_log("Reset password error: " . $e->getMessage());
-            $this->setFlash('error', 'An error occurred. Please try again.');
+            Session::flash('error', 'An error occurred. Please try again.');
             $this->redirect('/reset-password?token=' . urlencode($token));
         }
     }
 
     /**
-     * Verify email address
+     * Validate login form
      */
-    public function verifyEmail(): void
+    private function validateLoginForm(string $email, string $password): array
     {
-        $token = $_GET['token'] ?? '';
+        $errors = [];
 
-        if (empty($token)) {
-            $this->setFlash('error', 'Invalid verification token.');
-            $this->redirect('/login');
-            return;
+        if (empty($email)) {
+            $errors['email'][] = 'Email is required';
+        } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            $errors['email'][] = 'Please enter a valid email address';
         }
 
-        try {
-            $stmt = $this->db->prepare('
-                UPDATE users
-                SET email_verified_at = NOW(), verification_token = NULL, updated_at = NOW()
-                WHERE verification_token = ? AND email_verified_at IS NULL
-            ');
-            $stmt->execute([$token]);
-
-            if ($stmt->rowCount() > 0) {
-                $this->setFlash('success', 'Email verified successfully! You can now log in.');
-            } else {
-                $this->setFlash('error', 'Invalid or expired verification token.');
-            }
-
-        } catch (Exception $e) {
-            error_log("Email verification error: " . $e->getMessage());
-            $this->setFlash('error', 'An error occurred during verification.');
+        if (empty($password)) {
+            $errors['password'][] = 'Password is required';
         }
 
-        $this->redirect('/login');
+        return $errors;
     }
 
     /**
-     * Resend verification email
+     * Validate registration form
+     * REQ-AUTH-002, REQ-AUTH-003, REQ-AUTH-007, REQ-AUTH-008
      */
-    public function resendVerification(): void
+    private function validateRegistrationForm(array $data): array
     {
-        $email = trim($_POST['email'] ?? '');
+        $errors = [];
 
-        if (empty($email) || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
-            $this->setFlash('error', 'Please enter a valid email address.');
-            $this->redirect('/login');
-            return;
+        // First name validation - REQ-AUTH-007
+        if (empty($data['first_name'])) {
+            $errors['first_name'][] = 'First name is required';
+        } elseif (strlen($data['first_name']) > 100) {
+            $errors['first_name'][] = 'First name must not exceed 100 characters';
         }
 
-        try {
-            $stmt = $this->db->prepare('
-                SELECT id FROM users
-                WHERE email = ? AND email_verified_at IS NULL AND deleted_at IS NULL
-            ');
-            $stmt->execute([$email]);
-            $user = $stmt->fetch();
-
-            if ($user) {
-                $newToken = bin2hex(random_bytes(32));
-                $stmt = $this->db->prepare('
-                    UPDATE users
-                    SET verification_token = ?, updated_at = NOW()
-                    WHERE id = ?
-                ');
-                $stmt->execute([$newToken, $user['id']]);
-
-                // In a real app, send verification email here
-                // $this->sendVerificationEmail($email, $newToken);
-            }
-
-            // Always show success message for security
-            $this->setFlash('success', 'If an unverified account with that email exists, we\'ve sent a new verification link.');
-
-        } catch (Exception $e) {
-            error_log("Resend verification error: " . $e->getMessage());
-            $this->setFlash('error', 'An error occurred. Please try again.');
+        // Last name validation - REQ-AUTH-007
+        if (empty($data['last_name'])) {
+            $errors['last_name'][] = 'Last name is required';
+        } elseif (strlen($data['last_name']) > 100) {
+            $errors['last_name'][] = 'Last name must not exceed 100 characters';
         }
 
-        $this->redirect('/login');
+        // Email validation - REQ-AUTH-001, REQ-AUTH-002
+        if (empty($data['email'])) {
+            $errors['email'][] = 'Email is required';
+        } elseif (!filter_var($data['email'], FILTER_VALIDATE_EMAIL)) {
+            $errors['email'][] = 'Please enter a valid email address';
+        } elseif ($this->userModel->emailExists($data['email'])) {
+            $errors['email'][] = 'An account with this email address already exists';
+        }
+
+        // Password validation - REQ-AUTH-003
+        if (empty($data['password'])) {
+            $errors['password'][] = 'Password is required';
+        } elseif (!$this->isValidPassword($data['password'])) {
+            $errors['password'][] = 'Password must be at least 8 characters and contain at least one uppercase letter, one lowercase letter, and one number';
+        }
+
+        // Password confirmation
+        if ($data['password'] !== $data['password_confirmation']) {
+            $errors['password_confirmation'][] = 'Password confirmation does not match';
+        }
+
+        // Terms agreement validation
+        if (empty($_POST['agree_terms'])) {
+            $errors['agree_terms'][] = 'You must agree to the Terms of Service and Privacy Policy';
+        }
+
+        return $errors;
+    }
+
+    /**
+     * Check if password meets requirements
+     * REQ-AUTH-003: At least 8 chars, uppercase, lowercase, number
+     */
+    private function isValidPassword(string $password): bool
+    {
+        return strlen($password) >= 8 &&
+               preg_match('/[A-Z]/', $password) &&
+               preg_match('/[a-z]/', $password) &&
+               preg_match('/[0-9]/', $password);
     }
 
     /**
      * Check if IP/email is rate limited
+     * REQ-AUTH-014: 5 failed attempts in 15 minutes
      */
     private function isRateLimited(string $email): bool
     {
@@ -439,11 +537,12 @@ class AuthController extends BaseController
         ');
         $stmt->execute([$email, $ip, $timeWindow]);
 
-        return $stmt->fetchColumn() >= 5; // Max 5 failed attempts in 15 minutes
+        return $stmt->fetchColumn() >= 5;
     }
 
     /**
      * Record login attempt
+     * REQ-AUTH-015: Log all login attempts
      */
     private function recordLoginAttempt(string $email, bool $success): void
     {
@@ -459,6 +558,7 @@ class AuthController extends BaseController
 
     /**
      * Create remember me token
+     * REQ-AUTH-013: Remember me functionality
      */
     private function createRememberToken(int $userId): void
     {
@@ -474,9 +574,9 @@ class AuthController extends BaseController
             INSERT INTO remember_tokens (user_id, token, expires_at, created_at)
             VALUES (?, ?, ?, NOW())
         ');
-        $stmt->execute([$userId, $token, $expiresAt]);
+        $stmt->execute([$userId, hash('sha256', $token), $expiresAt]);
 
-        // Set cookie
+        // Set cookie - REQ-AUTH-012
         setcookie('remember_token', $token, [
             'expires' => strtotime('+30 days'),
             'path' => '/',

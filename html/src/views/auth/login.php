@@ -12,10 +12,27 @@
             <?php foreach ($flashes as $type => $message): ?>
                 <div id="flash-message" class="alert alert-<?= $type === 'error' ? 'danger' : $type ?> alert-dismissible fade show" role="alert">
                     <i class="bi bi-<?= $type === 'error' ? 'exclamation-circle' : ($type === 'success' ? 'check-circle' : 'info-circle') ?> me-2"></i>
-                    <?= htmlspecialchars($message) ?>
+                    <?= $message ?>
                     <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
                 </div>
             <?php endforeach; ?>
+        <?php endif; ?>
+
+        <!-- Validation Errors -->
+        <?php $errors = Session::getErrors(); ?>
+        <?php if (!empty($errors)): ?>
+            <div class="alert alert-danger alert-dismissible fade show" role="alert">
+                <i class="bi bi-exclamation-circle me-2"></i>
+                <strong>Please correct the following errors:</strong>
+                <ul class="mb-0 mt-2">
+                    <?php foreach ($errors as $field => $fieldErrors): ?>
+                        <?php foreach ($fieldErrors as $error): ?>
+                            <li><?= htmlspecialchars($error) ?></li>
+                        <?php endforeach; ?>
+                    <?php endforeach; ?>
+                </ul>
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            </div>
         <?php endif; ?>
 
         <form id="login-form" method="POST" action="/login" class="auth-form">
@@ -32,6 +49,7 @@
                     id="email"
                     name="email"
                     placeholder="Enter your email"
+                    value="<?= Session::getOldInput('email') ?>"
                     required
                     autocomplete="email"
                 >

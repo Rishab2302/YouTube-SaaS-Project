@@ -18,6 +18,14 @@ require_once __DIR__ . '/../src/helpers/Router.php';
 require_once __DIR__ . '/../src/helpers/Middleware.php';
 require_once __DIR__ . '/../src/helpers/CsrfToken.php';
 
+// Load models
+require_once __DIR__ . '/../src/models/User.php';
+require_once __DIR__ . '/../src/models/Category.php';
+
+// Load additional helpers
+require_once __DIR__ . '/../src/helpers/Email.php';
+require_once __DIR__ . '/../src/helpers/Session.php';
+
 // Load controllers
 require_once __DIR__ . '/../src/controllers/BaseController.php';
 require_once __DIR__ . '/../src/controllers/AuthController.php';
