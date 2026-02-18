@@ -18,6 +18,11 @@ require_once __DIR__ . '/../src/helpers/Router.php';
 require_once __DIR__ . '/../src/helpers/Middleware.php';
 require_once __DIR__ . '/../src/helpers/CsrfToken.php';
 
+// Load controllers
+require_once __DIR__ . '/../src/controllers/BaseController.php';
+require_once __DIR__ . '/../src/controllers/AuthController.php';
+require_once __DIR__ . '/../src/controllers/DashboardController.php';
+
 // Start session with secure configuration
 $config = getAppConfig();
 

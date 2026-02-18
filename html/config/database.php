@@ -27,8 +27,7 @@ class Database
             'options' => [
                 PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
                 PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-                PDO::ATTR_EMULATE_PREPARES => false,
-                PDO::MYSQL_ATTR_INIT_COMMAND => "SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci"
+                PDO::ATTR_EMULATE_PREPARES => false
             ]
         ];
     }
@@ -44,12 +43,17 @@ class Database
                 self::$config['charset']
             );
 
-            return new PDO(
+            $pdo = new PDO(
                 $dsn,
                 self::$config['username'],
                 self::$config['password'],
                 self::$config['options']
             );
+
+            // Set charset and collation after connection
+            $pdo->exec("SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci");
+
+            return $pdo;
         } catch (PDOException $e) {
             error_log("Database connection failed: " . $e->getMessage());
 
@@ -74,5 +78,5 @@ class Database
 
     // Prevent cloning and unserialization
     private function __clone() {}
-    private function __wakeup() {}
+    public function __wakeup() {}
 }
